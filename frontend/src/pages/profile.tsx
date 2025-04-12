@@ -9,7 +9,7 @@ import { AuthLogger } from '../utils/logging';
 import Head from 'next/head';
 
 // Define API base URL for consistent usage
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://main-service-48k0.onrender.com';
 
 // Use the same User interface that matches both the backend and AuthProvider
 interface User {
@@ -226,7 +226,7 @@ const ProfilePage = () => {
   return (
     <>
       <Head>
-        <title>My Profile | Gulpin AI Interview</title>
+        <title>My Profile</title>
       </Head>
       <ProtectedRoute>
         <PageTemplate title="Edit Profile" maxWidth="md">

@@ -7,7 +7,7 @@ import Head from 'next/head';
 import { PageTemplate } from '../components/PageTemplate';
 
 // Define API base URL for consistent usage
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://main-service-48k0.onrender.com';
 
 const HomePage = () => {
   const router = useRouter();
@@ -39,7 +39,7 @@ const HomePage = () => {
     return (
       <>
         <Head>
-          <title>Loading... | Gulpin AI Interview</title>
+          <title>Loading...</title>
         </Head>
         <PageTemplate title="Loading...">
           <div className="flex justify-center items-center h-64">
@@ -49,19 +49,18 @@ const HomePage = () => {
       </>
     );
   }
-
   return (
     <>
       <Head>
-        <title>Welcome to Gulpin AI Interview</title>
+        <title>Welcome to Noor</title>
         <meta name="description" content="AI-powered interviews that help you find the best candidates" />
       </Head>
-      <PageTemplate title="Welcome to Gulpin AI Interview">
+      <PageTemplate title="Welcome to Noor">
         <div className="min-h-screen bg-gray-50">
           <div className="max-w-7xl mx-auto py-12 px-4 sm:px-6 lg:px-8">
             <div className="text-center">
               <h1 className="text-4xl font-extrabold text-gray-900 sm:text-5xl sm:tracking-tight lg:text-6xl">
-                Gulpin AI Interview
+                Noor
               </h1>
               <p className="mt-5 max-w-xl mx-auto text-xl text-gray-500">
                 AI-powered interviews that help you find the best candidates
@@ -111,3 +110,4 @@ const HomePage = () => {
 };
 
 export default HomePage;
+

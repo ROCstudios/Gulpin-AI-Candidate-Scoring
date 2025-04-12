@@ -1,7 +1,21 @@
 from botocore.exceptions import ClientError
 from config import Config
-from database import get_db_connection, create_tables, migrate_submissions_table_add_resume_columns
-from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_file
+from database import (
+    get_db_connection,
+    create_tables,
+    migrate_submissions_table_add_resume_columns,
+)
+from flask import (
+    Flask,
+    render_template,
+    request,
+    redirect,
+    url_for,
+    flash,
+    session,
+    jsonify,
+    send_file,
+)
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 import boto3
@@ -10,8 +24,31 @@ import random
 import string
 import tempfile
 import uuid
-#import whisper
-import mariadb
+import sqlite3
+
+# Password security constants and utilities
+PASSWORD_HASH_METHOD = "pbkdf2:sha256"
+
+
+def hash_password(password: str) -> str:
+    """
+    Consistently hash passwords using the same method across the application.
+    """
+    return generate_password_hash(password, method=PASSWORD_HASH_METHOD)
+
+
+def verify_password(password_hash: str, password: str) -> bool:
+    """
+    Verify a password against a hash.
+    """
+    try:
+        return check_password_hash(password_hash, password)
+    except Exception as e:
+        print(f"Error verifying password: {e}")
+        return False
+
+
+# import whisper
 from fpdf import FPDF
 
 from api_routes import api_bp
@@ -27,71 +64,84 @@ from utils.file_handling import SafeTemporaryFile, safe_delete
 from flask_cors import CORS
 from datetime import timedelta
 import secrets
+from api_interview_routes import interview_bp
 
 
 app = Flask(__name__)
 
-# Configure CORS properly
-CORS(app, 
-    origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    supports_credentials=True,
-    allow_headers=["Content-Type", "X-Requested-With", "x-retry-count"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+# Configure CORS to allow all origins, methods, and headers
+CORS(
+    app,
+    resources={
+        r"/*": {
+            "origins": "*",
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
+            "allow_headers": ["*"],
+            "expose_headers": ["*"],
+            "supports_credentials": True,  # Enable credentials support
+            "max_age": 3600,
+        }
+    },
+)
 
 app.config.from_object(Config)
-app.register_blueprint(api_bp, url_prefix='/api')
+app.register_blueprint(api_bp, url_prefix="/api")
+app.register_blueprint(interview_bp, url_prefix="/interview")
 
 # Configure the app for proper session handling
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', Config.SECRET_KEY)
-app.config['SESSION_TYPE'] = 'filesystem'
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)  # Extend to 30 days
-app.config['SESSION_COOKIE_SECURE'] = False  # Set to True in production with HTTPS
-app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # Use 'Strict' in production
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", Config.SECRET_KEY)
+app.config["SESSION_TYPE"] = "filesystem"
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)  # Extend to 30 days
+app.config["SESSION_COOKIE_SECURE"] = False  # Set to True in production with HTTPS
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"  # Use 'Strict' in production
+app.config["SESSION_COOKIE_DOMAIN"] = None  # Allow cross-origin cookies
+
 
 # Make sessions permanent by default
 @app.before_request
 def make_session_permanent():
     session.permanent = True
 
+
 # Add a root-level health endpoint
-@app.route('/health', methods=['GET', 'HEAD'])
+@app.route("/health", methods=["GET", "HEAD", "OPTIONS"])
 def health_check():
     """
     Simple health check endpoint to verify the API is running.
-    This doesn't check database connectivity to allow CORS preflight to succeed.
     """
-    try:
-        return jsonify({"status": "ok", "message": "API is operational"}), 200
-    except Exception as e:
-        app.logger.error(f"Health check failed: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+    return jsonify({"status": "ok", "message": "API is operational"}), 200
+
 
 @app.before_first_request
 def create_tables_on_startup():
     try:
         create_tables()
         migrate_submissions_table_add_resume_columns()
-        
+
         # Execute the migration to update total_points to allow NULL
         conn = get_db_connection()
         try:
-            with conn.cursor() as cursor:
-                # Modify the total_points column to allow NULL values
-                cursor.execute("""
-                    ALTER TABLE submissions
-                    MODIFY COLUMN total_points INT DEFAULT NULL
-                """)
-                print("Successfully modified total_points column to allow NULL values")
-                
-                # Update existing submissions with total_points=0 to NULL
-                cursor.execute("""
-                    UPDATE submissions 
-                    SET total_points = NULL 
-                    WHERE total_points = 0 AND is_complete = FALSE
-                """)
-                print(f"Updated {cursor.rowcount} submissions with total_points=0 to NULL")
-                
+            cursor = conn.cursor()
+            # Modify the total_points column to allow NULL values
+            cursor.execute(
+                """
+                ALTER TABLE submissions
+                MODIFY COLUMN total_points INT DEFAULT NULL
+            """
+            )
+            print("Successfully modified total_points column to allow NULL values")
+
+            # Update existing submissions with total_points=0 to NULL
+            cursor.execute(
+                """
+                UPDATE submissions 
+                SET total_points = NULL 
+                WHERE total_points = 0 AND is_complete = FALSE
+            """
+            )
+            print(f"Updated {cursor.rowcount} submissions with total_points=0 to NULL")
+
             conn.commit()
         except Exception as e:
             print(f"Error during migration: {e}")
@@ -104,116 +154,167 @@ def create_tables_on_startup():
         # Don't crash the application - let it continue even with DB issues
         # The health check will still work, but database operations will fail
 
-@app.route("/register", methods=["GET", "POST"])
+
+@app.route("/register", methods=["POST"])
 def register():
-    if request.method == "POST":
-        if request.is_json:
-            data = request.get_json()
-            email = data.get("email")
-            name = data.get("name", "")
-            password = data.get("password")
-        else:
-            email = request.form.get("email")
-            name = request.form.get("name", "")
-            password = request.form.get("password")
+    if not request.is_json:
+        return (
+            jsonify(
+                {"success": False, "message": "Content-Type must be application/json"}
+            ),
+            400,
+        )
 
-        hashed_password = generate_password_hash(password, method='pbkdf2:sha256')
+    data = request.get_json()
+    email = data.get("email")
+    name = data.get("name", "")
+    password = data.get("password")
 
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cursor:
-                sql = "INSERT INTO users (id, email, name, password_hash, is_admin) VALUES (UUID_SHORT(), ?, ?, ?, ?)"
-                cursor.execute(sql, (email, name, hashed_password, False))
-            conn.commit()
-            
-            if request.is_json:
-                return jsonify({"success": True, "message": "Registration successful! Please log in."}), 201
-            else:
-                flash("Registration successful! Please log in.", "success")
-                return redirect(url_for("login"))
-        except mariadb.Error as e:
-            conn.rollback()
-            if request.is_json:
-                return jsonify({"success": False, "message": f"Error: {str(e)}"}), 400
-            else:
-                flash(f"Error: {str(e)}", "danger")
-                return render_template("register.html")
-        finally:
-            conn.close()
+    if not all([email, name, password]):
+        return (
+            jsonify(
+                {"success": False, "message": "Email, name, and password are required"}
+            ),
+            400,
+        )
 
-    return render_template("register.html")
+    # Use the utility function for password hashing
+    hashed_password = hash_password(password)
 
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        sql = "INSERT INTO users (id, email, name, password_hash, is_admin) VALUES (?, ?, ?, ?, ?)"
+        cursor.execute(
+            sql,
+            (
+                str(uuid.uuid4().int & (1 << 64) - 1),
+                email,
+                name,
+                hashed_password,
+                False,
+            ),
+        )
+        conn.commit()
 
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if request.method == "POST":
-        # Handle both JSON and form data requests
-        if request.is_json:
-            data = request.get_json()
-            email = data.get("email")
-            password = data.get("password")
-        else:
-            email = request.form.get("email")
-            password = request.form.get("password")
-        
-        conn = get_db_connection()
-        with conn.cursor(dictionary=True) as cursor:
-            sql = "SELECT id, email, name, password_hash, is_admin FROM users WHERE email = ?"
-            cursor.execute(sql, (email,))
-            user = cursor.fetchone()
+        return (
+            jsonify(
+                {
+                    "success": True,
+                    "message": "Registration successful! Please log in.",
+                    "user": {"email": email, "name": name, "is_admin": False},
+                }
+            ),
+            201,
+        )
 
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"Database error during registration: {e}")
+        return (
+            jsonify(
+                {"success": False, "message": "An error occurred during registration"}
+            ),
+            400,
+        )
+    finally:
         conn.close()
 
-        if user and check_password_hash(user["password_hash"], password):
-            # Store user info in session
-            session["user_id"] = user["id"]
-            session["email"] = user["email"]
-            session["name"] = user["name"]
-            session["is_admin"] = user["is_admin"]
-            
-            # For JSON requests (API)
-            if request.is_json:
-                user_data = {
-                    "id": str(user["id"]),
-                    "email": user["email"],
-                    "name": user["name"],
-                    "is_admin": user["is_admin"]
-                }
-                return jsonify({
+
+@app.route("/login", methods=["POST"])
+def login():
+    if not request.is_json:
+        return (
+            jsonify(
+                {"success": False, "message": "Content-Type must be application/json"}
+            ),
+            400,
+        )
+
+    data = request.get_json()
+    email = data.get("email")
+    password = data.get("password")
+
+    if not all([email, password]):
+        return (
+            jsonify({"success": False, "message": "Email and password are required"}),
+            400,
+        )
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row  # Enable dictionary-like access
+        cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
+        user = cursor.fetchone()
+
+        # First check if user exists
+        if not user:
+            return (
+                jsonify({"success": False, "message": "Invalid email or password"}),
+                401,
+            )
+
+        # Then safely check password
+        try:
+            password_hash = user["password_hash"]
+            if not password_hash or not verify_password(password_hash, password):
+                return (
+                    jsonify({"success": False, "message": "Invalid email or password"}),
+                    401,
+                )
+        except (KeyError, TypeError) as e:
+            # Log the error internally but don't expose it to the user
+            print(f"Error: Invalid password_hash format for user {email}: {e}")
+            return (
+                jsonify({"success": False, "message": "Invalid email or password"}),
+                401,
+            )
+
+        # If we get here, both user exists and password is correct
+        session["user_id"] = user["id"]
+        session["is_admin"] = user["is_admin"]
+
+        return (
+            jsonify(
+                {
                     "success": True,
-                    "message": "Login successful!",
-                    "user": user_data
-                }), 200
-            
-            # For form submissions (Web UI)
-            else:
-                flash("Login successful!", "success")
-                return redirect(url_for("index"))
-        else:
-            # Authentication failed
-            if request.is_json:
-                return jsonify({
-                    "success": False, 
-                    "message": "Invalid email or password"
-                }), 401
-            else:
-                flash("Invalid email or password", "danger")
-                return render_template("login.html")
-    
-    return render_template("login.html")
+                    "message": "Login successful",
+                    "user": {
+                        "id": user["id"],
+                        "email": user["email"],
+                        "name": user["name"],
+                        "is_admin": user["is_admin"],
+                    },
+                    "redirect_to": "/admin" if user["is_admin"] else "/candidate",
+                }
+            ),
+            200,
+        )
+
+    except sqlite3.Error as e:
+        print(f"Database error during login: {e}")
+        return (
+            jsonify({"success": False, "message": "An error occurred during login"}),
+            500,
+        )
+    finally:
+        conn.close()
+
 
 @app.route("/logout", methods=["GET", "POST"])
 def logout():
     # Clear session data
     session.clear()
-    
+
     # For API requests
     if request.is_json:
         return jsonify({"success": True, "message": "Logged out successfully"}), 200
-    
+
     # For web UI
     flash("You have been logged out.", "success")
     return redirect(url_for("login"))
+
 
 # Decorator for checking if a user is logged in
 def login_required(f):
@@ -222,14 +323,18 @@ def login_required(f):
         # Check if user is logged in via session
         if "user_id" not in session:
             # For API requests, return 401
-            if request.is_json or request.headers.get('Content-Type') == 'application/json':
+            if (
+                request.is_json
+                or request.headers.get("Content-Type") == "application/json"
+            ):
                 return jsonify({"error": "Authentication required"}), 401
             # For web UI, redirect to login
             return redirect(url_for("login"))
-        
+
         return f(*args, **kwargs)
 
     return decorated_function
+
 
 # Decorator to check admin status
 def admin_required(f):
@@ -238,11 +343,14 @@ def admin_required(f):
         # Check if user is an admin via session
         if not session.get("is_admin"):
             # For API requests, return 403
-            if request.is_json or request.headers.get('Content-Type') == 'application/json':
+            if (
+                request.is_json
+                or request.headers.get("Content-Type") == "application/json"
+            ):
                 return jsonify({"error": "Admin privileges required"}), 403
             # For web UI, redirect to home
             return redirect(url_for("index"))
-        
+
         return f(*args, **kwargs)
 
     return decorated_function
@@ -259,9 +367,9 @@ def admin_index():
 @admin_required
 def admin_users():
     conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("SELECT id, email, is_admin FROM users")
-        users = cursor.fetchall()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, email, is_admin FROM users")
+    users = cursor.fetchall()
     conn.close()
     return render_template("admin/users/users.html", users=users)
 
@@ -276,12 +384,21 @@ def admin_create_user():
 
         # Generate a random password
         password = "".join(random.choices(string.ascii_letters + string.digits, k=12))
-        hashed_password = generate_password_hash(password, method="pbkdf2:sha256")
+        hashed_password = hash_password(password)
 
         conn = get_db_connection()
-        with conn.cursor() as cursor:
-            sql = "INSERT INTO users (id, email, name, password_hash, is_admin) VALUES (UUID_SHORT(), ?, ?, ?, ?)"
-            cursor.execute(sql, (email, name, hashed_password, is_admin))
+        cursor = conn.cursor()
+        sql = "INSERT INTO users (id, email, name, password_hash, is_admin) VALUES (?, ?, ?, ?, ?)"
+        cursor.execute(
+            sql,
+            (
+                str(uuid.uuid4().int & (1 << 64) - 1),
+                email,
+                name,
+                hashed_password,
+                is_admin,
+            ),
+        )
         conn.commit()
         conn.close()
 
@@ -297,9 +414,9 @@ def admin_create_user():
 @admin_required
 def admin_campaigns():
     conn = get_db_connection()
-    with conn.cursor(dictionary=True) as cursor:
-        cursor.execute("SELECT * FROM campaigns")
-        campaigns = cursor.fetchall()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM campaigns")
+    campaigns = cursor.fetchall()
     conn.close()
     return render_template("admin/campaigns/campaigns_list.html", campaigns=campaigns)
 
@@ -316,41 +433,48 @@ def admin_create_campaign():
         questions = data.get("questions", [])
 
         conn = get_db_connection()
-        with conn.cursor() as cursor:
-            # Insert the new campaign
+        cursor = conn.cursor()
+        # Insert the new campaign
+        cursor.execute(
+            "INSERT INTO campaigns (id, title, max_user_submissions, max_points, is_public) VALUES (?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4().int & (1 << 64) - 1),
+                title,
+                max_user_submissions,
+                0,
+                is_public,
+            ),
+        )
+        campaign_id = cursor.lastrowid
+
+        total_max_points = 0
+
+        # Insert the questions for the campaign
+        for question in questions:
+            question_title = question.get("title")
+            question_body = question.get("body")
+            scoring_prompt = question.get("scoring_prompt")
+            max_points = int(question.get("max_points"))
+            total_max_points += max_points
+            sql_question = """
+                INSERT INTO questions (id, campaign_id, title, body, scoring_prompt, max_points)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """
             cursor.execute(
-                "INSERT INTO campaigns (id, title, max_user_submissions, max_points, is_public) VALUES (UUID_SHORT(), ?, ?, ?, ?)",
-                (title, max_user_submissions, 0, is_public),
+                sql_question,
+                (
+                    str(uuid.uuid4().int & (1 << 64) - 1),
+                    campaign_id,
+                    question_title,
+                    question_body,
+                    scoring_prompt,
+                    max_points,
+                ),
             )
-            campaign_id = cursor.lastrowid
 
-            total_max_points = 0
-
-            # Insert the questions for the campaign
-            for question in questions:
-                question_title = question.get("title")
-                question_body = question.get("body")
-                scoring_prompt = question.get("scoring_prompt")
-                max_points = int(question.get("max_points"))
-                total_max_points += max_points
-                sql_question = """
-                    INSERT INTO questions (id, campaign_id, title, body, scoring_prompt, max_points)
-                    VALUES (UUID_SHORT(), ?, ?, ?, ?, ?)
-                """
-                cursor.execute(
-                    sql_question,
-                    (
-                        campaign_id,
-                        question_title,
-                        question_body,
-                        scoring_prompt,
-                        max_points,
-                    ),
-                )
-
-            # Update the campaign with the total max points
-            sql_update_campaign = "UPDATE campaigns SET max_points = ? WHERE id = ?"
-            cursor.execute(sql_update_campaign, (total_max_points, campaign_id))
+        # Update the campaign with the total max points
+        sql_update_campaign = "UPDATE campaigns SET max_points = ? WHERE id = ?"
+        cursor.execute(sql_update_campaign, (total_max_points, campaign_id))
 
         conn.commit()
         conn.close()
@@ -364,24 +488,24 @@ def admin_create_campaign():
 @admin_required
 def admin_campaign_details(campaign_id):
     conn = get_db_connection()
-    with conn.cursor(dictionary=True) as cursor:
-        # Get campaign details
-        cursor.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,))
-        campaign = cursor.fetchone()
+    cursor = conn.cursor()
+    # Get campaign details
+    cursor.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,))
+    campaign = cursor.fetchone()
 
-        # Get questions count
-        cursor.execute(
-            "SELECT COUNT(*) AS count FROM questions WHERE campaign_id = ?",
-            (campaign_id,),
-        )
-        questions_count = cursor.fetchone()["count"]
+    # Get questions count
+    cursor.execute(
+        "SELECT COUNT(*) AS count FROM questions WHERE campaign_id = ?",
+        (campaign_id,),
+    )
+    questions_count = cursor.fetchone()["count"]
 
-        # Get submissions count
-        cursor.execute(
-            "SELECT COUNT(*) AS count FROM submissions WHERE campaign_id = ?",
-            (campaign_id,),
-        )
-        submissions_count = cursor.fetchone()["count"]
+    # Get submissions count
+    cursor.execute(
+        "SELECT COUNT(*) AS count FROM submissions WHERE campaign_id = ?",
+        (campaign_id,),
+    )
+    submissions_count = cursor.fetchone()["count"]
 
     conn.close()
 
@@ -397,41 +521,41 @@ def admin_campaign_details(campaign_id):
 @admin_required
 def admin_submission_details(campaign_id, submission_id):
     conn = get_db_connection()
-    with conn.cursor(dictionary=True) as cursor:
-        # Get submission details
-        cursor.execute(
-            """
-        SELECT submissions.*, users.email, campaigns.title AS campaign_name
-        FROM submissions
-        JOIN users ON submissions.user_id = users.id
-        JOIN campaigns ON submissions.campaign_id = campaigns.id
-        WHERE submissions.id = ?
-        """,
-            (submission_id,),
-        )
-        submission = cursor.fetchone()
+    cursor = conn.cursor()
+    # Get submission details
+    cursor.execute(
+        """
+    SELECT submissions.*, users.email, campaigns.title AS campaign_name
+    FROM submissions
+    JOIN users ON submissions.user_id = users.id
+    JOIN campaigns ON submissions.campaign_id = campaigns.id
+    WHERE submissions.id = ?
+    """,
+        (submission_id,),
+    )
+    submission = cursor.fetchone()
 
-        # Get user
-        cursor.execute(
-            """
-        SELECT * FROM USERS
-        WHERE id = ?
-        """,
-            (submission["user_id"],),
-        )
-        user = cursor.fetchone()
+    # Get user
+    cursor.execute(
+        """
+    SELECT * FROM USERS
+    WHERE id = ?
+    """,
+        (submission["user_id"],),
+    )
+    user = cursor.fetchone()
 
-        # Get submission answers
-        cursor.execute(
-            """
-        SELECT submission_answers.*, questions.title AS question_title
-        FROM submission_answers
-        JOIN questions ON submission_answers.question_id = questions.id
-        WHERE submission_answers.submission_id = ?
-        """,
-            (submission_id,),
-        )
-        submission_answers = cursor.fetchall()
+    # Get submission answers
+    cursor.execute(
+        """
+    SELECT submission_answers.*, questions.title AS question_title
+    FROM submission_answers
+    JOIN questions ON submission_answers.question_id = questions.id
+    WHERE submission_answers.submission_id = ?
+    """,
+        (submission_id,),
+    )
+    submission_answers = cursor.fetchall()
 
     conn.close()
 
@@ -448,31 +572,31 @@ def admin_submission_details(campaign_id, submission_id):
 @admin_required
 def admin_edit_submission(campaign_id, submission_id):
     conn = get_db_connection()
-    with conn.cursor(dictionary=True) as cursor:
-        # Get submission details
-        cursor.execute(
-            """
-        SELECT submissions.*, users.email, campaigns.title AS campaign_name
-        FROM submissions
-        JOIN users ON submissions.user_id = users.id
-        JOIN campaigns ON submissions.campaign_id = campaigns.id
-        WHERE submissions.id = ?
-        """,
-            (submission_id,),
-        )
-        submission = cursor.fetchone()
+    cursor = conn.cursor()
+    # Get submission details
+    cursor.execute(
+        """
+    SELECT submissions.*, users.email, campaigns.title AS campaign_name
+    FROM submissions
+    JOIN users ON submissions.user_id = users.id
+    JOIN campaigns ON submissions.campaign_id = campaigns.id
+    WHERE submissions.id = ?
+    """,
+        (submission_id,),
+    )
+    submission = cursor.fetchone()
 
-        # Get submission answers
-        cursor.execute(
-            """
-        SELECT submission_answers.*, questions.title AS question_title
-        FROM submission_answers
-        JOIN questions ON submission_answers.question_id = questions.id
-        WHERE submission_answers.submission_id = ?
-        """,
-            (submission_id,),
-        )
-        submission_answers = cursor.fetchall()
+    # Get submission answers
+    cursor.execute(
+        """
+    SELECT submission_answers.*, questions.title AS question_title
+    FROM submission_answers
+    JOIN questions ON submission_answers.question_id = questions.id
+    WHERE submission_answers.submission_id = ?
+    """,
+        (submission_id,),
+    )
+    submission_answers = cursor.fetchall()
 
     conn.close()
 
@@ -488,18 +612,18 @@ def admin_edit_submission(campaign_id, submission_id):
 @admin_required
 def admin_edit_campaign(campaign_id):
     conn = get_db_connection()
-    with conn.cursor(dictionary=True) as cursor:
-        # Get campaign details
-        cursor.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,))
-        campaign = cursor.fetchone()
+    cursor = conn.cursor()
+    # Get campaign details
+    cursor.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,))
+    campaign = cursor.fetchone()
 
-        if not campaign:
-            flash("Campaign not found", "error")
-            return redirect(url_for("admin_campaigns"))
+    if not campaign:
+        flash("Campaign not found", "error")
+        return redirect(url_for("admin_campaigns"))
 
-        # Get campaign questions
-        cursor.execute("SELECT * FROM questions WHERE campaign_id = ?", (campaign_id,))
-        questions = cursor.fetchall()
+    # Get campaign questions
+    cursor.execute("SELECT * FROM questions WHERE campaign_id = ?", (campaign_id,))
+    questions = cursor.fetchall()
 
     conn.close()
 
@@ -511,14 +635,14 @@ def admin_edit_campaign(campaign_id):
 # Mock: Example function to get campaign questions from DB
 def get_campaign_questions(campaign_id):
     conn = get_db_connection()
-    with conn.cursor(dictionary=True) as cursor:
-        sql = """
-        SELECT id, title, body, scoring_prompt
-        FROM questions
-        WHERE campaign_id = ?
-        """
-        cursor.execute(sql, (campaign_id,))
-        questions = cursor.fetchall()
+    cursor = conn.cursor()
+    sql = """
+    SELECT id, title, body, scoring_prompt
+    FROM questions
+    WHERE campaign_id = ?
+    """
+    cursor.execute(sql, (campaign_id,))
+    questions = cursor.fetchall()
     conn.close()
     # Convert id to string
     for question in questions:
@@ -631,14 +755,21 @@ def upload_interview():
         # 4. Insert the submission answer into the database
         try:
             conn = get_db_connection()
-            with conn.cursor() as cursor:
-                sql = """
-                INSERT INTO submission_answers (id, submission_id, question_id, video_path, transcript)
-                VALUES (UUID_SHORT(), ?, ?, ?, ?)
-                """
-                cursor.execute(
-                    sql, (submission_id, question_id, s3_filename, transcript_text)
-                )
+            cursor = conn.cursor()
+            sql = """
+            INSERT INTO submission_answers (id, submission_id, question_id, video_path, transcript)
+            VALUES (?, ?, ?, ?, ?)
+            """
+            cursor.execute(
+                sql,
+                (
+                    str(uuid.uuid4().int & (1 << 64) - 1),
+                    submission_id,
+                    question_id,
+                    s3_filename,
+                    transcript_text,
+                ),
+            )
             conn.commit()
             conn.close()
         except Exception as e:
@@ -685,7 +816,7 @@ def watch_video(filename):
 @app.route("/finalize_submission/<int:submission_id>", methods=["POST"])
 def finalize_submission(submission_id):
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor()
 
     # Get submission details
     cursor.execute("SELECT campaign_id FROM submissions WHERE id = ?", (submission_id,))
@@ -764,7 +895,7 @@ def finalize_submission(submission_id):
 @admin_required
 def admin_submission_report(submission_id):
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor()
 
     # Get submission details
     cursor.execute(
@@ -935,14 +1066,14 @@ def index():
 @admin_required
 def admin_user_details(user_id):
     conn = get_db_connection()
-    with conn.cursor(dictionary=True) as cursor:
-        # Get user details
-        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-        user = cursor.fetchone()
+    cursor = conn.cursor()
+    # Get user details
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
 
-        if not user:
-            flash("User not found", "error")
-            return redirect(url_for("admin_users"))
+    if not user:
+        flash("User not found", "error")
+        return redirect(url_for("admin_users"))
 
     conn.close()
 
@@ -953,48 +1084,44 @@ def admin_user_details(user_id):
 @admin_required
 def admin_edit_user(user_id):
     conn = get_db_connection()
-    with conn.cursor(dictionary=True) as cursor:
-        # Get user details
-        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-        user = cursor.fetchone()
+    cursor = conn.cursor()
+    # Get user details
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
 
-        if not user:
-            flash("User not found", "error")
-            return redirect(url_for("admin_users"))
+    if not user:
+        flash("User not found", "error")
+        return redirect(url_for("admin_users"))
 
-        if request.method == "POST":
-            email = request.form.get("email")
-            name = request.form.get("name")
-            is_admin = request.form.get("is_admin") == "on"
-            reset_password = request.form.get("reset_password") == "on"
+    if request.method == "POST":
+        email = request.form.get("email")
+        name = request.form.get("name")
+        is_admin = request.form.get("is_admin") == "on"
+        reset_password = request.form.get("reset_password") == "on"
 
-            update_sql = (
-                "UPDATE users SET email = ?, name = ?, is_admin = ? WHERE id = ?"
+        update_sql = "UPDATE users SET email = ?, name = ?, is_admin = ? WHERE id = ?"
+        update_values = [email, name, is_admin, user_id]
+
+        if reset_password:
+            # Generate a new random password
+            password = "".join(
+                random.choices(string.ascii_letters + string.digits, k=12)
             )
-            update_values = [email, name, is_admin, user_id]
+            hashed_password = hash_password(password)
+            update_sql = "UPDATE users SET email = ?, name = ?, is_admin = ?, password_hash = ? WHERE id = ?"
+            update_values = [email, name, is_admin, hashed_password, user_id]
+            flash(
+                f"User updated successfully! The new password is: {password}",
+                "success",
+            )
+            return render_template(
+                "admin/users/edit_user_confirmation.html", password=password
+            )
 
-            if reset_password:
-                # Generate a new random password
-                password = "".join(
-                    random.choices(string.ascii_letters + string.digits, k=12)
-                )
-                hashed_password = generate_password_hash(
-                    password, method="pbkdf2:sha256"
-                )
-                update_sql = "UPDATE users SET email = ?, name = ?, is_admin = ?, password_hash = ? WHERE id = ?"
-                update_values = [email, name, is_admin, hashed_password, user_id]
-                flash(
-                    f"User updated successfully! The new password is: {password}",
-                    "success",
-                )
-                return render_template(
-                    "admin/users/edit_user_confirmation.html", password=password
-                )
-
-            cursor.execute(update_sql, update_values)
-            conn.commit()
-            flash("User updated successfully!", "success")
-            return redirect(url_for("admin_user_details", user_id=user_id))
+        cursor.execute(update_sql, update_values)
+        conn.commit()
+        flash("User updated successfully!", "success")
+        return redirect(url_for("admin_user_details", user_id=user_id))
 
     conn.close()
     return render_template("admin/users/edit_user.html", user=user)
@@ -1004,9 +1131,9 @@ def admin_edit_user(user_id):
 @login_required
 def profile():
     conn = get_db_connection()
-    with conn.cursor(dictionary=True) as cursor:
-        cursor.execute("SELECT * FROM users WHERE id = ?", (session["user_id"],))
-        user = cursor.fetchone()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE id = ?", (session["user_id"],))
+    user = cursor.fetchone()
     conn.close()
     return render_template("profile.html", user=user)
 
@@ -1015,39 +1142,39 @@ def profile():
 @login_required
 def edit_profile():
     conn = get_db_connection()
-    with conn.cursor(dictionary=True) as cursor:
-        cursor.execute("SELECT * FROM users WHERE id = ?", (session["user_id"],))
-        user = cursor.fetchone()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE id = ?", (session["user_id"],))
+    user = cursor.fetchone()
 
-        if request.method == "POST":
-            name = request.form.get("name")
-            email = request.form.get("email")
-            current_password = request.form.get("current_password")
-            new_password = request.form.get("new_password")
-            confirm_password = request.form.get("confirm_password")
+    if request.method == "POST":
+        name = request.form.get("name")
+        email = request.form.get("email")
+        current_password = request.form.get("current_password")
+        new_password = request.form.get("new_password")
+        confirm_password = request.form.get("confirm_password")
 
-            if not check_password_hash(user["password_hash"], current_password):
-                flash("Incorrect current password", "danger")
-                return render_template("edit_profile.html", user=user)
+        if not verify_password(user["password_hash"], current_password):
+            flash("Incorrect current password", "danger")
+            return render_template("edit_profile.html", user=user)
 
-            if new_password and new_password != confirm_password:
-                flash("New passwords do not match", "danger")
-                return render_template("edit_profile.html", user=user)
+        if new_password and new_password != confirm_password:
+            flash("New passwords do not match", "danger")
+            return render_template("edit_profile.html", user=user)
 
-            update_sql = "UPDATE users SET name = ?, email = ? WHERE id = ?"
-            update_values = [name, email, session["user_id"]]
+        update_sql = "UPDATE users SET name = ?, email = ? WHERE id = ?"
+        update_values = [name, email, session["user_id"]]
 
-            if new_password:
-                hashed_password = generate_password_hash(
-                    new_password, method="pbkdf2:sha256"
-                )
-                update_sql = "UPDATE users SET name = ?, email = ?, password_hash = ? WHERE id = ?"
-                update_values = [name, email, hashed_password, session["user_id"]]
+        if new_password:
+            hashed_password = hash_password(new_password)
+            update_sql = (
+                "UPDATE users SET name = ?, email = ?, password_hash = ? WHERE id = ?"
+            )
+            update_values = [name, email, hashed_password, session["user_id"]]
 
-            cursor.execute(update_sql, update_values)
-            conn.commit()
-            flash("Profile updated successfully!", "success")
-            return redirect(url_for("profile"))
+        cursor.execute(update_sql, update_values)
+        conn.commit()
+        flash("Profile updated successfully!", "success")
+        return redirect(url_for("profile"))
 
     conn.close()
     return render_template("edit_profile.html", user=user)
@@ -1148,18 +1275,30 @@ def admin_create_campaign_from_doc():
 
     return render_template("admin/campaigns/create_campaign_from_doc.html")
 
+
 # Add a route to test sessions
-@app.route('/api/test-session', methods=['GET', 'POST'])
+@app.route("/api/test-session", methods=["GET", "POST"])
 def test_session():
-    if request.method == 'POST':
-        session['test_value'] = 'This is a test value'
+    if request.method == "POST":
+        session["test_value"] = "This is a test value"
         return jsonify({"message": "Session value set", "session": dict(session)})
     else:
-        return jsonify({
-            "has_session": bool(session),
-            "session_contents": dict(session),
-            "test_value": session.get('test_value', 'Not set')
-        })
+        return jsonify(
+            {
+                "has_session": bool(session),
+                "session_contents": dict(session),
+                "test_value": session.get("test_value", "Not set"),
+            }
+        )
+
+
+# Handle OPTIONS requests globally
+@app.route("/", defaults={"path": ""}, methods=["OPTIONS"])
+@app.route("/<path:path>", methods=["OPTIONS"])
+def handle_options(path):
+    response = app.response_class(response=[], status=200)
+    return response
+
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, host="0.0.0.0", port=5001)

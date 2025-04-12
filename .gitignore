@@ -12,7 +12,8 @@ backend/.env.local
 backend/.env.develop
 
 .env
-
+.env.development
+.env.production
 
 # dependencies
 frontend/node_modules
@@ -47,3 +48,4 @@ node_modules/*
 **/.env.production
 **/.env.test
 **/.env.staging
+NoorIA.pem

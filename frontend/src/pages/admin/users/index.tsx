@@ -3,6 +3,9 @@ import axios from 'axios';
 import Link from 'next/link';
 import { PageTemplate } from '../../../components/PageTemplate';
 import { AuthLogger } from '../../../utils/logging';
+import { 
+  UserPlusIcon
+} from '@heroicons/react/24/outline';
 // Import Tabulator config
 import configureTabulatorDependencies from '../../../utils/tabulator-config';
 // Import Tabulator styles
@@ -10,6 +13,8 @@ import 'react-tabulator/lib/styles.css';
 import 'react-tabulator/lib/css/tabulator.min.css';
 // Import custom tabulator styles
 import '../../../styles/tabulator.css';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:5001';
 
 // Initialize Tabulator with required dependencies
 configureTabulatorDependencies();
@@ -47,7 +52,7 @@ const UsersPage = () => {
     const fetchUsers = async () => {
       try {
         setIsLoading(true);
-        const response = await axios.get('/api/users');
+        const response = await axios.get(`${API_URL}/api/users`);
         setUsers(response.data);
         AuthLogger.info(`Loaded ${response.data.length} users successfully`);
       } catch (err) {
@@ -75,7 +80,17 @@ const UsersPage = () => {
       title: "Role", 
       field: "is_admin", 
       widthGrow: 1.5, 
-      formatter: (cell: any) => cell.getValue() ? "Admin" : "Candidate" 
+      formatter: (cell: any) => {
+        const isAdmin = cell.getValue();
+        return `
+          <div class="flex items-center justify-center">
+            ${isAdmin ? 
+              '<div class="flex items-center text-indigo-600"><ShieldCheckIcon class="h-5 w-5 mr-1" />Admin</div>' : 
+              '<div class="flex items-center text-gray-600"><UserIcon class="h-5 w-5 mr-1" />Candidate</div>'
+            }
+          </div>
+        `;
+      }
     },
     { 
       title: "Actions", 
@@ -85,9 +100,15 @@ const UsersPage = () => {
       formatter: function(cell: any) {
         const id = cell.getValue();
         return `
-          <div class="flex space-x-2 justify-center">
-            <a href="/admin/users/${id}" class="text-blue-500 hover:text-blue-700">View</a>
-            <a href="/admin/users/${id}/edit" class="text-indigo-500 hover:text-indigo-700">Edit</a>
+          <div class="flex space-x-4 justify-center">
+            <a href="/admin/users/${id}" class="text-blue-500 hover:text-blue-700 flex items-center">
+              <EyeIcon class="h-5 w-5 mr-1" />
+              View
+            </a>
+            <a href="/admin/users/${id}/edit" class="text-indigo-500 hover:text-indigo-700 flex items-center">
+              <PencilSquareIcon class="h-5 w-5 mr-1" />
+              Edit
+            </a>
           </div>
         `;
       },
@@ -124,12 +145,12 @@ const UsersPage = () => {
   return (
     <PageTemplate title="User Management">
       <div className="bg-white shadow-md rounded-lg p-6">
-        <div className="flex justify-between items-center mb-6">
-          <h1 className="text-2xl font-bold">User Management</h1>
+        <div className="flex justify-end items-center mb-6">
           <Link 
             href="/admin/users/create" 
-            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md font-medium"
+            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md font-medium flex items-center"
           >
+            <UserPlusIcon className="h-5 w-5 mr-2" />
             Add New User
           </Link>
         </div>
