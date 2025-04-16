@@ -6,7 +6,7 @@ import { PageTemplate } from '../../../components/PageTemplate';
 import { Spinner } from '../../../components/ui/Spinner';
 import { UserGroupIcon } from '@heroicons/react/24/outline';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:5001';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://main-service-48k0.onrender.com';
 
 // Define interface for Question object
 interface Question {
@@ -73,16 +73,15 @@ const EditCampaignPage = () => {
   // Add useEffect to fetch candidates
   useEffect(() => {
     const fetchCandidates = async () => {
-      setIsLoadingCandidates(true);
       try {
-        const response = await axios.get('/api/users');
-        const nonAdminUsers = response.data.filter((user: User) => !user.is_admin);
+        const response = await axios.get(`${API_URL}/api/users`);
+        // Ensure response.data is an array before filtering
+        const users = Array.isArray(response.data) ? response.data : [];
+        const nonAdminUsers = users.filter((user: User) => !user.is_admin);
         setCandidates(nonAdminUsers);
       } catch (error) {
         console.error('Error fetching candidates:', error);
-        setError('Failed to load candidates');
-      } finally {
-        setIsLoadingCandidates(false);
+        setError('Failed to fetch candidates');
       }
     };
 
@@ -527,7 +526,7 @@ const EditCampaignPage = () => {
           </div>
           
           {/* Add Candidate Selection Section */}
-          <div className="space-y-4">
+          {/* <div className="space-y-4">
             <div className="flex justify-between items-center">
               <h2 className="text-xl font-semibold">Candidate Assignment</h2>
               <UserGroupIcon className="h-6 w-6 text-gray-500" />
@@ -567,7 +566,7 @@ const EditCampaignPage = () => {
                 </div>
               )}
             </div>
-          </div>
+          </div> */}
           
           {/* Questions */}
           <div>

@@ -22,7 +22,7 @@ import { useRouter } from 'next/router';
 import { useAuth } from '@/app/components/AuthProvider';
 import { Dialog } from '@headlessui/react';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:5001';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://main-service-48k0.onrender.com';
 
 interface SubmissionStatus {
   total_submissions: number;
@@ -68,14 +68,23 @@ const SimpleVoiceAssistant: React.FC<{ onTranscriptUpdate: (transcript: any[]) =
 
   const [messages, setMessages] = React.useState<Array<{ id?: string; type: 'agent' | 'user'; text: string }>>([]);
 
+  // Memoize the transcript update to prevent unnecessary re-renders
+  const handleTranscriptUpdate = React.useCallback((newMessages: any[]) => {
+    onTranscriptUpdate(newMessages);
+  }, [onTranscriptUpdate]);
+
   React.useEffect(() => {
     const allMessages = [
       ...(agentTranscriptions?.map((t) => ({ ...t, type: 'agent' as const })) ?? []),
       ...(userTranscriptions?.map((t) => ({ ...t, type: 'user' as const })) ?? []),
     ].sort((a, b) => a.firstReceivedTime - b.firstReceivedTime);
-    setMessages(allMessages);
-    onTranscriptUpdate(allMessages);
-  }, [agentTranscriptions, userTranscriptions, onTranscriptUpdate]);
+
+    // Only update if messages have actually changed
+    if (JSON.stringify(allMessages) !== JSON.stringify(messages)) {
+      setMessages(allMessages);
+      handleTranscriptUpdate(allMessages);
+    }
+  }, [agentTranscriptions, userTranscriptions, messages, handleTranscriptUpdate]);
 
   return (
     <div className="voice-assistant-container">
@@ -163,8 +172,8 @@ const LiveKitInterviewComponent = ({ campaignId, onInterviewComplete, token, roo
   const livekitUrl = 'wss://default-test-oyjqa9xh.livekit.cloud';
   const [showOnboarding, setShowOnboarding] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  const [scoringResult, setScoringResult] = useState<any>(null);
+  const [isProcessingSubmission, setIsProcessingSubmission] = useState(false);
+  const [transcript, setTranscript] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
   const [submissionStatus, setSubmissionStatus] = useState<SubmissionStatus>({
@@ -183,7 +192,7 @@ const LiveKitInterviewComponent = ({ campaignId, onInterviewComplete, token, roo
 
       try {
         setIsLoading(true);
-        const response = await axios.get(`${process.env.NEXT_PUBLIC_API_URL}/api/submissions`, {
+        const response = await axios.get(`${API_URL}/api/submissions`, {
           params: {
             campaign_id: campaignId,
             user_id: user.id
@@ -214,28 +223,70 @@ const LiveKitInterviewComponent = ({ campaignId, onInterviewComplete, token, roo
     fetchSubmissionStatus();
   }, [campaignId, user?.id]);
 
-  const handleTranscriptUpdate = async (newTranscript: any[]) => {
-    if (!user?.id || !submissionId) return;
+  const handleTranscriptUpdate = async (submitInterview: boolean = false, newTranscript: any[]) => {
+    if (!user?.id || !submissionId) {
+      console.error('Missing required data:', { user_id: user?.id, submissionId });
+      return;
+    }
 
     try {
-      setIsSubmitting(true);
-      const response = await axios.post(`${process.env.NEXT_PUBLIC_API_URL}/api/submit_interview`, {
-        campaign_id: campaignId,
-        user_id: user.id,
-        submission_id: submissionId,
-        transcript: newTranscript
-      });
+      if (submitInterview) {
+        // Ensure transcript is an array and not empty
+        const formattedTranscript = Array.isArray(newTranscript) ? newTranscript : [];
+        if (formattedTranscript.length === 0) {
+          console.error('Cannot submit interview: transcript is empty');
+          setError('Cannot submit interview: no conversation recorded');
+          return;
+        }
 
-      if (response.data.success) {
-        onInterviewComplete(submissionId);
+        console.log('🚀 Submitting interview transcript:', {
+          transcript: formattedTranscript,
+          submissionId,
+          campaignId,
+          userId: user.id
+        });
+        
+        setIsProcessingSubmission(true);
+        const response = await axios.post(`${API_URL}/api/submit_interview`, {
+          campaign_id: campaignId,
+          user_id: user.id,
+          submission_id: submissionId,
+          transcript: formattedTranscript
+        });
+
+        if (response.data.success) {
+          console.log('✅ Interview submitted successfully');
+          router.push('/campaigns');
+        } else {
+          throw new Error(response.data.error || 'Failed to submit interview');
+        }
       } else {
-        throw new Error(response.data.error || 'Failed to submit interview');
+        setTranscript(newTranscript);
       }
     } catch (err) {
       console.error('Error submitting interview:', err);
       setError('Failed to submit interview. Please try again.');
     } finally {
-      setIsSubmitting(false);
+      setIsProcessingSubmission(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    try {
+      if (!submissionId) {
+        console.error('No submissionId available for submission');
+        return;
+      }
+
+      setIsProcessingSubmission(true);
+      await handleTranscriptUpdate(true, transcript);
+      onDisconnect();
+      router.push('/campaigns');
+    } catch (err) {
+      console.error('Error during disconnect:', err);
+      setError('Failed to properly disconnect. Please try again.');
+    } finally {
+      setIsProcessingSubmission(false);
     }
   };
 
@@ -256,103 +307,54 @@ const LiveKitInterviewComponent = ({ campaignId, onInterviewComplete, token, roo
     );
   }
 
-  if (!submissionStatus.can_submit) {
-    return (
-      <div className="bg-white shadow-md rounded-lg p-6">
-        <h2 className="text-2xl font-bold mb-4">Interview Not Available</h2>
-        <p className="text-gray-600 mb-4">
-          {submissionStatus.has_completed_submission 
-            ? "You have already completed this interview"
-            : `Maximum attempts reached (${submissionStatus.max_submissions})`}
-        </p>
-        <button
-          onClick={() => router.push('/campaigns')}
-          className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-        >
-          Return to Campaigns
-        </button>
-      </div>
-    );
-  }
-
-  if (showOnboarding) {
-    return (
-      <div className="bg-white shadow-md rounded-lg p-6">
-        <h2 className="text-2xl font-bold mb-4">Interview Instructions</h2>
-        <div className="space-y-4">
-          <p className="text-gray-600">
-            Welcome to your interview! Please review the following instructions before starting:
-          </p>
-          <ul className="list-disc list-inside space-y-2 text-gray-600">
-            <li>Ensure your microphone and camera are working properly</li>
-            <li>Find a quiet, well-lit environment</li>
-            <li>Have your resume and any relevant materials ready</li>
-            <li>Be prepared to answer questions about your experience and skills</li>
-          </ul>
-          <button
-            onClick={() => setShowOnboarding(false)}
-            className="mt-4 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-          >
-            Start Interview
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="bg-white shadow-md rounded-lg p-6">
-      <h2 className="text-2xl font-bold mb-4">Live Interview</h2>
-      
-      <div className="mb-6">
-        <h3 className="text-lg font-semibold mb-2">Your Application Status</h3>
-        <div className="grid grid-cols-2 gap-4">
-          <div className="bg-gray-50 p-4 rounded">
-            <p className="text-sm text-gray-500">Attempts Used</p>
-            <p className="text-lg font-semibold">
-              {submissionStatus.total_submissions} of {submissionStatus.max_submissions}
-            </p>
+    <div className="livekit-interview">
+      {showOnboarding && (
+        <OnboardingModal onClose={() => setShowOnboarding(false)} />
+      )}
+      <div className="bg-white rounded-lg overflow-hidden shadow-lg">
+        <div className="p-4 bg-blue-600 text-white">
+          <div className="flex justify-between items-center">
+            <h2 className="text-xl font-bold">Interview Session: {user?.name}</h2>
+            <button 
+              onClick={handleDisconnect}
+              className="px-3 py-1 bg-white text-blue-600 rounded hover:bg-blue-50 transition-colors"
+            >
+              End Interview
+            </button>
           </div>
-          <div className="bg-gray-50 p-4 rounded">
-            <p className="text-sm text-gray-500">Completed Interviews</p>
-            <p className="text-lg font-semibold">{submissionStatus.completed_submissions}</p>
-          </div>
+        </div>
+        
+        <div className="p-6">
+          <LiveKitRoom
+            serverUrl={livekitUrl}
+            token={token}
+            connect={true}
+            video={false}
+            audio={true}
+            onDisconnected={() => {
+              console.log('🔌 LiveKit disconnected, submitting transcript...');
+              handleDisconnect();
+            }}
+          >
+            <RoomAudioRenderer />
+            <SimpleVoiceAssistant onTranscriptUpdate={(transcript) => handleTranscriptUpdate(false, transcript)} />
+          </LiveKitRoom>
         </div>
       </div>
 
-      {token && submissionId && (
-        <LiveKitRoom
-          token={token}
-          serverUrl={livekitUrl}
-          connect={true}
-          onDisconnected={() => handleTranscriptUpdate([])}
-        >
-          <RoomAudioRenderer />
-          <VideoConference />
-          <ControlBar />
-        </LiveKitRoom>
-      )}
-      
-      <Dialog
-        open={isSubmitting}
-        onClose={() => {}}
-        className="fixed inset-0 z-10 overflow-y-auto"
+      {/* Processing Modal */}
+      <Modal 
+        isOpen={isProcessingSubmission}
+        title="Processing Interview"
       >
-        <div className="flex items-center justify-center min-h-screen">
-          <div className="fixed inset-0 bg-black opacity-30" />
-          <div className="relative bg-white rounded-lg p-8 max-w-md w-full mx-4">
-            <Dialog.Title className="text-lg font-medium mb-4">
-              Processing Your Interview
-            </Dialog.Title>
-            <div className="flex items-center justify-center">
-              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-700"></div>
-            </div>
-            <p className="mt-4 text-center text-gray-600">
-              Please wait while we process your interview responses...
-            </p>
-          </div>
+        <div className="flex flex-col items-center space-y-4">
+          <Spinner size="large" />
+          <p className="text-gray-600 text-center">
+            Please wait while we process your interview responses and calculate scores...
+          </p>
         </div>
-      </Dialog>
+      </Modal>
     </div>
   );
 };

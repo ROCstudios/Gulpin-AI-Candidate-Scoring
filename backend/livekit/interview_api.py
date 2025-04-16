@@ -1,4 +1,4 @@
-from livekit.agents import llm
+from livekit.agents import llm, JobContext
 import enum
 from typing import List
 import logging
@@ -54,12 +54,12 @@ class InterviewStage(enum.Enum):
     Closing = "closing"
 
 
-class AssistantFnc(llm.FunctionContext):
+class AssistantFnc:
     def __init__(self):
-        super().__init__()
         self._campaign_data = None
         self._current_stage = InterviewStage.Introduction
         self._question_index = 0
+        self.ai_functions = {}  # Required by MultimodalAgent
 
     def get_campaign_str(self):
         if not self._campaign_data:
@@ -122,8 +122,8 @@ Max Points: {self._campaign_data.max_points}
                 status_code=500,
             )
 
-    @llm.ai_callable(description="get the details of the current campaign")
     def get_campaign_details(self):
+        """Get the details of the current campaign"""
         try:
             logger.info("get campaign details")
             return f"The campaign details are:\n{self.get_campaign_str()}"
@@ -136,8 +136,8 @@ Max Points: {self._campaign_data.max_points}
                 status_code=500,
             )
 
-    @llm.ai_callable(description="get the next interview question")
     def get_next_question(self):
+        """Get the next interview question"""
         try:
             if not self._campaign_data:
                 return "Please set campaign data first"
